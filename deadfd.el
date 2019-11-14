@@ -859,7 +859,7 @@ Otherwise, return PATH as is."
 If called with a prefix argument, create the results buffer but
 don't actually start the search."
   (interactive (list (deadfd--read-search-term)))
-  (fd search-term (funcall deadfd-project-root-function)))
+  (fd (format "fd -c never -p -tf %s " search-term) (funcall deadfd-project-root-function)))
 ;;;###autoload
 (defun fd (search-term search-dir)
   "Start a ripfd search for SEARCH-TERM.
