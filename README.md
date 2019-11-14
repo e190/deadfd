@@ -6,9 +6,13 @@ deadfd主要在windows10使用
 M-x deadfd
 <img src="./images/fd-screenshot.png">
 # 方法
-| deadfd | 搜索输入字符在默认文件夹 |
-| fd     | 自定义搜索               |
+| 名称      | 描述            |
+| :-------- | :----                    |
+| deadfd    | 搜索输入字符在默认文件夹 |
+| fd        | 自定义搜索               |
 # 快捷：
-| Enter | 用windows默认程序打开             |
-| o     | 用windows默认程序打开             |
-| f     | 用windows默认程序打开文件所在目录 |
+| 快捷键    | 描述                              |
+| :-------- | :----                             |
+| Enter     | 用windows默认程序打开             |
+| o         | 用windows默认程序打开             |
+| f         | 用windows默认程序打开文件所在目录 |
