@@ -106,6 +106,11 @@ overflow on our regexp matchers if we don't apply this.")
   "Face used for the search term in results buffers."
   :group 'deadfd)
 
+(defface deadfd-fd-term-face
+  '((t :inherit font-lock-variable-name-face))
+  "Face used for the search term in results buffers."
+  :group 'deadfd)
+
 (defface deadfd-regexp-metachar-face
   '((t :inherit
        ;; TODO: I've seen a more appropriate face in some themes,
@@ -150,6 +155,67 @@ It is used to create `imenu' index.")
   (rx "\x1b[" (+ digit) "m")
   "Regular expression for an ANSI color code.")
 
+(defun deadfd-replace-regexp-in-string (regexp string &optional
+					fixedcase literal subexp start)
+  "Replace all matches for REGEXP with REP in STRING.
+
+Return a new string containing the replacements.
+
+Optional arguments FIXEDCASE, LITERAL and SUBEXP are like the
+arguments with the same names of function `replace-match'.  If START
+is non-nil, start replacements at that index in STRING, and omit
+the first START characters of STRING from the return value.
+
+REP is either a string used as the NEWTEXT arg of `replace-match' or a
+function.  If it is a function, it is called with the actual text of each
+match, and its value is used as the replacement text.  When REP is called,
+the match data are the result of matching REGEXP against a substring
+of STRING, the same substring that is the actual text of the match which
+is passed to REP as its argument.
+
+To replace only the first match (if any), make REGEXP match up to \\\\='
+and replace a sub-expression, e.g.
+  (replace-regexp-in-string \"\\\\(foo\\\\).*\\\\\\='\" \"bar\" \" foo foo\" nil nil 1)
+    => \" bar foo\""
+
+  ;; To avoid excessive consing from multiple matches in long strings,
+  ;; don't just call `replace-match' continually.  Walk down the
+  ;; string looking for matches of REGEXP and building up a (reversed)
+  ;; list MATCHES.  This comprises segments of STRING which weren't
+  ;; matched interspersed with replacements for segments that were.
+  ;; [For a `large' number of replacements it's more efficient to
+  ;; operate in a temporary buffer; we can't tell from the function's
+  ;; args whether to choose the buffer-based implementation, though it
+  ;; might be reasonable to do so for long enough STRING.]
+  (let ((l (length string))
+	(start (or start 0))
+	matches str mb me)
+    (save-match-data
+      (while (and (< start l) (string-match regexp string start))
+	(setq mb (match-beginning 0)
+	      me (match-end 0))
+	;; If we matched the empty string, make sure we advance by one char
+	(when (= me mb) (setq me (min l (1+ mb))))
+	;; Generate a replacement for the matched substring.
+	;; Operate only on the substring to minimize string consing.
+	;; Set up match data for the substring for replacement;
+	;; presumably this is likely to be faster than munging the
+	;; match data directly in Lisp.
+	(string-match regexp (setq str (substring string mb me)))
+        (let ((rep (propertize str 'face 'deadfd-match-face)) )
+          (setq matches
+	      (cons (replace-match (if (stringp rep)
+				       rep
+				     (funcall rep (match-string 0 str)))
+				   fixedcase literal str subexp)
+		    (cons (substring string start mb) ; unmatched prefix
+			  matches)))
+            )	
+	(setq start me))
+      ;; Reconstruct a string from the pieces.
+      (setq matches (cons (substring string start l) matches)) ; leftover
+      (apply #'concat (nreverse matches)))))
+
 (defun deadfd--insert-output (output &optional finished)
   "Propertize OUTPUT from rifd and write to the current buffer."
   ;; If we had an unfinished line from our last call, include that.
@@ -179,8 +245,11 @@ It is used to create `imenu' index.")
          ;; about something (e.g. zero matches for a
          ;; glob, or permission denied on some directories).                
          (t
-           (insert line "\n")
-          ))))))
+          (insert (deadfd-replace-regexp-in-string
+                   (car (split-string-and-unquote deadfd--search-term))                   
+                   line t)  "\n")
+          ))))    
+    ))
 
 (defvar deadfd-finished-hook nil
   "Hook run when `deadfd' search is finished.")
@@ -226,9 +295,79 @@ It is used to create `imenu' index.")
     (with-current-buffer (process-buffer process)
       (deadfd--insert-output output))))
 
+
+(defun deadfd--extract-regexp (pattern s)
+  "Search for PATTERN in S, and return the content of the first group."
+  (string-match pattern s)
+  (match-string 1 s))
+
+(defconst deadfd--filename-regexp
+  (rx bos "\x1b[0m\x1b[3" (or "5" "6") "m"
+      (? "./")
+      (group (+? anything))
+      "\x1b[")
+  "Extracts the filename from a ripgrep line with ANSI color sequences.
+We use the color sequences to extract the filename exactly, even
+if the path contains colons.")
+
+(defconst deadfd--line-num-regexp
+  (rx "\x1b[32m" (group (+ digit)))
+  "Extracts the line number from a ripgrep line with ANSI color sequences.
+Ripgrep uses a unique color for line numbers, so we use that to
+extract the linue number exactly.")
+
+(defconst deadfd--line-contents-regexp
+  (rx "\x1b[32m" (+ digit) "\x1b[0m" (or ":" "-") (group (* anything)))
+  "Extract the line contents from a ripgrep line with ANSI color sequences.
+Use the unique color for line numbers to ensure we start at the
+correct colon.
+
+Note that the text in the group will still contain color codes
+highlighting which parts matched the user's search term.")
+
+(defconst deadfd--hit-regexp
+  (rx-to-string
+   `(seq
+     ;; A reset color code.
+     "\x1b[0m"
+     ;; Two color codes, bold and color (any order).
+     (regexp ,deadgrep--color-code)
+     (regexp ,deadgrep--color-code)
+     ;; The actual text.
+     (group (+? anything))
+     ;; A reset color code again.
+     "\x1b[0m"))
+  "Extract the portion of a line found by ripgrep that matches the user's input.
+This may occur multiple times in one line.")
+
+(defun deadfd--split-line (line)
+  "Split out the components of a raw LINE of output from rg.
+Return the filename, line number, and the line content with ANSI
+color codes replaced with string properties."
+  (list
+   (deadfd--extract-regexp deadfd--filename-regexp line)
+   (string-to-number
+    (deadfd--extract-regexp deadfd--line-num-regexp line))
+   (deadfd--propertize-hits
+    (deadfd--extract-regexp deadfd--line-contents-regexp line))))
+
+(defun deadfd--propertize-hits (line-contents)
+  "Given LINE-CONTENTS from ripgrep, replace ANSI color codes
+with Emacs text properties."
+  (replace-regexp-in-string
+   deadfd--search-term
+     (propertize
+      deadfd--search-term
+      'face 'deadfd-match-face)
+   line-contents))
+
 (define-button-type 'deadfd-search-term
   'action #'deadfd--search-term
   'help-echo "Change search term")
+
+(define-button-type 'deadfd-fd-term
+  'action #'deadfd--fd-term
+  'help-echo "Change fd term")
 
 (defun deadfd--search-term (_button)
   (setq deadfd--search-term
@@ -238,6 +377,14 @@ It is used to create `imenu' index.")
          deadfd--search-term))
   (rename-buffer
    (deadfd--buffer-name deadfd--search-term default-directory) t)
+  (deadfd-restart))
+
+(defun deadfd--fd-term (_button)
+  (setq deadfd--fd-term
+        ;; TODO: say string or regexp
+        (read-from-minibuffer
+         "Fd term: "
+         deadfd--fd-term))  
   (deadfd-restart))
 
 (defun deadfd--button (text type &rest properties)
@@ -271,7 +418,15 @@ search settings."
                'face 'deadfd-search-term-face)
             " "
             (deadfd--button "change" 'deadfd-search-term)
-            "\n\n"
+            "\n"
+            (propertize "Fd term: "
+                        'face 'deadfd-meta-face)
+              (propertize
+               deadfd--fd-term
+               'face 'deadfd-fd-term-face)
+            " "
+            (deadfd--button "change" 'deadfd-fd-term)
+            "\n"
             (propertize "Directory: "
                         'face 'deadfd-meta-face)
             (deadfd--button
@@ -293,7 +448,7 @@ search settings."
 (defun deadfd--buffer-name (search-term directory)
   ;; TODO: Handle buffers already existing with this name.
   (format "*fd %s*"          
-          (abbreviate-file-name directory)))
+          search-term))
 
 (defun deadfd--buffers ()
   "All the current deadfd results buffers.
@@ -304,7 +459,7 @@ Returns a list ordered by the most recently accessed."
             ;; visited first.
             (buffer-list)))
 
-(defun deadfd--buffer (search-term directory initial-filename)
+(defun deadfd--buffer (fd-term search-term directory initial-filename)
   "Create and initialise a search results buffer."
   (let* ((buf-name (deadfd--buffer-name search-term directory))
          (buf (get-buffer buf-name)))
@@ -334,6 +489,7 @@ Returns a list ordered by the most recently accessed."
         (erase-buffer)
 
         (setq deadfd--search-term search-term)
+        (setq deadfd--fd-term fd-term)
         (setq deadfd--current-file nil)
         (setq deadfd--initial-filename initial-filename))
       (setq buffer-read-only t))
@@ -343,10 +499,10 @@ Returns a list ordered by the most recently accessed."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'deadfd-visit-result)
     (define-key map (kbd "o") #'deadfd-visit-result)
-    (define-key map (kbd "f") #'deadfd-visit-open-result)
+    (define-key map (kbd "d") #'deadfd-visit-open-result)
     ;; TODO: we should still be able to click on buttons.
 
-    (define-key map (kbd "g") #'deadfd-restart)
+    (define-key map (kbd "f") #'deadfd-restart)
 
     ;; TODO: this should work when point in anywhere in file, not just
     ;; on its heading.
@@ -552,7 +708,7 @@ If POS is nil, use the beginning position of the current line."
          (file-name (s-trim (buffer-substring-no-properties (line-beginning-position)
                                                       (line-end-position)))))
     ;;(message "deadfd-visit-open-result:%s"file-name)
-    (when file-name
+    (when file-name      
       (org-open-file-with-system (f-dirname file-name))
       )))
 
@@ -721,15 +877,20 @@ matches (if the result line has been truncated)."
   (interactive)
   (deadfd--move-match nil))
 
-(defun deadfd--start (cmd)
+(defun deadfd--start (fd-term search-term)
   "Start a ripfd search."
   (setq deadfd--spinner (spinner-create 'progress-bar t))
   (setq deadfd--running t)
   (spinner-start deadfd--spinner)
-  (let* ((command (encode-coding-string cmd 'gbk))
+  (let* ((command (encode-coding-string
+                   (if (s-contains? "%s" fd-term)
+                       (format fd-term  search-term)
+                     (concat fd-term " " search-term)) 'gbk))
          (process
           (start-file-process-shell-command
-           (format "%s" cmd)
+           (if (s-contains? "%s" fd-term)
+               (format fd-term  search-term)
+             (concat fd-term " " search-term))
            (current-buffer)
            command)))
     (setq deadfd--debug-command command)
@@ -778,7 +939,7 @@ matches (if the result line has been truncated)."
 
     (if deadfd--postpone-start
         (deadfd--write-postponed)
-      (deadfd--start
+      (deadfd--start deadfd--fd-term
        deadfd--search-term))))
 (defun deadfd--read-search-term ()
   "Read a search term from the minibuffer.
@@ -859,22 +1020,24 @@ Otherwise, return PATH as is."
 If called with a prefix argument, create the results buffer but
 don't actually start the search."
   (interactive (list (deadfd--read-search-term)))
-  (fd (format "fd -c never -p -tf %s " search-term) (funcall deadfd-project-root-function)))
+  (fd "fd " search-term (funcall deadfd-project-root-function)))
 ;;;###autoload
-(defun fd (search-term search-dir)
+(defun fd (search-term search-dir &optional fd-term)
   "Start a ripfd search for SEARCH-TERM.
 If called with a prefix argument, create the results buffer but
 don't actually start the search."
   (interactive)
   (let* ((dir search-dir)
+         (fd-term (if fd-term fd-term "fd %s"))
          (buf (deadfd--buffer
-               search-term
+               fd-term
+               search-term               
                dir
                (or deadfd--initial-filename
                    (buffer-file-name))))
          )
-
-    (switch-to-buffer buf)
+    (switch-to-buffer-other-window buf)
+    ;;(switch-to-buffer buf)
 
     (setq next-error-function #'deadfd-next-error)
 
@@ -891,6 +1054,7 @@ don't actually start the search."
           (deadfd--write-postponed))
       ;; Start the search immediately.
       (deadfd--start
+       fd-term
        search-term))))
 
 (defun deadfd-next-error (arg reset)
