@@ -331,8 +331,8 @@ highlighting which parts matched the user's search term.")
      ;; A reset color code.
      "\x1b[0m"
      ;; Two color codes, bold and color (any order).
-     (regexp ,deadgrep--color-code)
-     (regexp ,deadgrep--color-code)
+     (regexp ,deadfd--color-code)
+     (regexp ,deadfd--color-code)
      ;; The actual text.
      (group (+? anything))
      ;; A reset color code again.
@@ -1020,7 +1020,7 @@ Otherwise, return PATH as is."
 If called with a prefix argument, create the results buffer but
 don't actually start the search."
   (interactive (list (deadfd--read-search-term)))
-  (fd "fd " search-term (funcall deadfd-project-root-function)))
+  (fd search-term (funcall deadfd-project-root-function)))
 ;;;###autoload
 (defun fd (search-term search-dir &optional fd-term)
   "Start a ripfd search for SEARCH-TERM.
@@ -1028,7 +1028,7 @@ If called with a prefix argument, create the results buffer but
 don't actually start the search."
   (interactive)
   (let* ((dir search-dir)
-         (fd-term (if fd-term fd-term "fd %s"))
+         (fd-term (if fd-term fd-term "fd -c never"))
          (buf (deadfd--buffer
                fd-term
                search-term               
